@@ -14,7 +14,7 @@ int main() {
     // Настройки
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
-    std::cout << std::scientific << std::setprecision(10);
+    std::cout << std::scientific << std::setprecision(4);
     
     // ============ НАЧАЛО ===============
     // Вводим данные
@@ -36,6 +36,7 @@ int main() {
     }
 
     // ============ ЗАПУСК РАСЧЁТА ===============
+    std::cout << "Вычисления начались\n"; 
     auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < n; ++i) {
         result[i] = (a[i] > b[i]) ? a[i] : b[i];

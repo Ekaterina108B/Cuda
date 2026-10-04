@@ -39,7 +39,7 @@ int main() {
     // Настройки
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
-    std::cout << std::scientific << std::setprecision(10);
+    std::cout << std::scientific << std::setprecision(4);
     
     // ============ НАЧАЛО ===============
     // Вводим данные
@@ -105,7 +105,8 @@ int main() {
     }
 
     // ============ ЗАПУСК CUDA ===============
-    const int THREADS = 256, BLOCKS = 1024;
+    std::cout << "Вычисления начались " << n << '\n'; 
+    const int THREADS = 1024, BLOCKS = 1024;
     if (!checkCuda(cudaEventRecord(start), "cudaEventRecord start")) {
         cudaEventDestroy(start); cudaEventDestroy(stop);
         closeGPU(d_a, d_b, d_result);
@@ -157,9 +158,9 @@ int main() {
     }
 
     // Вывод
-    for (int i = 0; i < n; ++i) {
-        std::cout << result[i] << " ";
-    }
+    // for (int i = 0; i < n; ++i) {
+    //     std::cout << result[i] << " ";
+    // }
     std::cout << '\n' << "Time [ms]: " << milliseconds << '\n';
 
     // Очистка
