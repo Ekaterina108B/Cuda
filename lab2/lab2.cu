@@ -118,6 +118,10 @@ int main() {
         fin.close();
         return 0;
     }
+    if ((uint64_t)W * H > 400000000ull) {
+        formatError("Out of bounds", "W * H > 400000000u");
+        return 0;
+    }
 
     // Загружаем все пиксели и закрываем чтение файла
     size_t inBytes  = (size_t)W * H * 4;
