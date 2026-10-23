@@ -139,7 +139,7 @@ int main() {
             sumG += p.y;
             sumB += p.z;
         }
-         avg[j] = make_float3(
+        avg[j] = make_float3(
             static_cast<float>(sumR / np),
             static_cast<float>(sumG / np),
             static_cast<float>(sumB / np)
@@ -195,6 +195,7 @@ int main() {
     std::ofstream fout(outFile, std::ios::binary);
     if (!fout) {
         formatError("FileOut", "can not open");
+        cudaFree(d_pixels);
         return 0;
     }
     fout.write(reinterpret_cast<const char*>(&W), 4);

@@ -67,7 +67,7 @@ int main() {
     size_t inBytes  = (size_t)W * H * 4;
     size_t outBytes = (size_t)w * h * 4;
     std::vector<unsigned char> pixelsIn(inBytes);
-     std::vector<unsigned char> pixelsOut(outBytes);
+    std::vector<unsigned char> pixelsOut(outBytes);
     fin.read(reinterpret_cast<char*>(pixelsIn.data()), inBytes);
     if (!fin) {
         formatError("Input", "short read");
