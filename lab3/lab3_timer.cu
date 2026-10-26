@@ -181,8 +181,8 @@ int main() {
     }
 
     // ============ ЗАПУСК ГИПЕРЯДРА ===============
-    dim3 BLOCK(32); // Координаты Ока
-    dim3 GRID(16); // Координаты Квантовой Луны
+    dim3 BLOCK(1024); // Координаты Ока
+    dim3 GRID(1024); // Координаты Квантовой Луны
     if (!checkCuda(cudaEventRecord(start), "cudaEventRecord start")) { // Временная петля в 22 минуты запущена
         cudaEventDestroy(start); cudaEventDestroy(stop);
         cudaFree(d_pixels);

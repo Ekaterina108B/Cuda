@@ -117,7 +117,7 @@ int main() {
             }
         }
 
-        image[idx+3] = static_cast<unsigned char>(js);
+        image[idx+3] = static_cast<unsigned char>(js) * 35;
     }
     auto stop = std::chrono::steady_clock::now();
 
@@ -138,6 +138,9 @@ int main() {
     std::cout << "W = " << W << ", H = " << H << '\n';
     std::cout << "Количество кластеров: " << nc << '\n';
     std::cout << "Time [ms]: " << milliseconds << '\n';
+    for (int i = 0; i < nc; ++i) {
+        std::cout << i << ": [ " << avg[i*3] << ", " << avg[i*3+1] << ", " << avg[i*3+2] << " ]" << '\n';
+    }
 
     return 0;
 }
