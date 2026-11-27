@@ -1,12 +1,11 @@
 #include <iostream>
 #include <cuda_runtime.h>
-#include <vector>
+#include <cmath>
 #include <iomanip>
+#include <vector>
 #include <string>
 #include <exception>
-#include <cmath>
 
-#include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
@@ -14,8 +13,8 @@
 
 constexpr double EPS = 1e-7;
 
-constexpr int BLOCK_X = 16;
-constexpr int BLOCK_Y = 16;
+constexpr int BLOCK_X = 32;
+constexpr int BLOCK_Y = 32;
 constexpr int GRID_X = 32;
 constexpr int GRID_Y = 32;
 constexpr int SWAP_BLOCK = 256;
@@ -43,53 +42,53 @@ bool checkCuda(cudaError_t error, const std::string& operation) {
 // ============================================================
 // ЯДРА CUDA
 // ============================================================
-
-// Преобразователь для поиска максимального элемента
-// в столбце обычной матрицы через Thrust.
+// Преобразователь для поиска максимального по модулю
+// элемента в строке транспонированной матрицы через Thrust.
 struct ColumnAbs {
-    const double* A;
+    const double* T;
     int n;
     int k;
 
     __host__ __device__
     double operator()(int offset) const {
-        return fabs(A[(size_t)(k + offset) * n + k]);
+        return fabs(T[(size_t)k * n + (k + offset)]);
     }
 };
 
-// Перестановка строк обычной матрицы
-__global__ void swapRows(double* A, int n, int r1, int r2) {
-    if (r1 == r2)
-        return;
+// Перестановка столбцов транспонированной матрицы
+__global__ void swapTransposed(double* T, int n, int c1, int c2) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
 
-    for (int j = blockIdx.x * blockDim.x + threadIdx.x;
-         j < n;
-         j += blockDim.x * gridDim.x) {
+    for (; j < n; j += stride) {
+        if (c1 != c2) {
+            double tmp = T[(size_t)j * n + c1];
 
-        double tmp = A[(size_t)r1 * n + j];
+            T[(size_t)j * n + c1] =
+                T[(size_t)j * n + c2];
 
-        A[(size_t)r1 * n + j] =
-            A[(size_t)r2 * n + j];
-
-        A[(size_t)r2 * n + j] = tmp;
+            T[(size_t)j * n + c2] = tmp;
+        }
     }
 }
 
-// Обновление обычной матрицы
-__global__ void naive(double* A, int n, int k) {
-    int i = k + 1 + blockIdx.y * blockDim.y + threadIdx.y;
-    int j = k + 1 + blockIdx.x * blockDim.x + threadIdx.x;
 
+// Обновление транспонированной матрицы
+__global__ void halfRefinement(double* T, int n, int k) {
+    // Координаты потока
+    int j = k + 1 + blockIdx.y * blockDim.y + threadIdx.y;
+    int i = k + 1 + blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Шаг перемещения по сетке
     int strideY = blockDim.y * gridDim.y;
     int strideX = blockDim.x * gridDim.x;
 
-    for (; i < n; i += strideY) {
-        for (int col = j; col < n; col += strideX) {
-            double factor = A[(size_t)i * n + k]
-                          / A[(size_t)k * n + k];
-
-            A[(size_t)i * n + col] -=
-                factor * A[(size_t)k * n + col];
+    // Проходим по строкам транспонированной матрицы
+    for (; j < n; j += strideY) {
+        double factor = T[(size_t)j * n + k] / T[(size_t)k * n + k];
+        // Проходим по столбцам транспонированной матрицы
+        for (int col = i; col < n; col += strideX) {
+            T[(size_t)j * n + col] -= factor * T[(size_t)k * n + col];
         }
     }
 }
@@ -97,38 +96,30 @@ __global__ void naive(double* A, int n, int k) {
 // ============================================================
 // ИНЫЕ ФУНКЦИИ
 // ============================================================
-
 // Поиск главного элемента через THRUST
-int findPivotNaive(const double* d_A, int n, int k) {
+int findPivotTransposed(const double* d_T, int n, int k) {
     auto countingBegin = thrust::make_counting_iterator(0);
+    ColumnAbs absColumn{d_T, n, k};
 
-    ColumnAbs absColumn{d_A, n, k};
-
-    auto begin = thrust::make_transform_iterator(
-        countingBegin, absColumn
-    );
-
+    auto begin = thrust::make_transform_iterator(countingBegin, absColumn);
     auto end = begin + (n - k);
-
-    auto maxIt = thrust::max_element(
-        thrust::device, begin, end
-    );
+    auto maxIt = thrust::max_element(thrust::device, begin, end);
 
     return k + (int)(maxIt - begin);
 }
 
 // Вычисление определителя
-double determinantDirect(
-    const std::vector<double>& diagonal,
-    int swaps
-) {
-    double result = (swaps % 2 == 0) ? 1.0 : -1.0;
-
+double determinantLog(const std::vector<double>& diagonal, int swaps) {
+    double logSum = 0.0;
+    int sign = ((swaps & 1) == 0) ? 1 : -1;
     for (double x : diagonal) {
-        result *= x;
+        if (x < 0.0)
+            sign = -sign;
+
+        logSum += std::log(std::abs(x));
     }
 
-    return result;
+    return (double)sign * std::exp(logSum);
 }
 
 // ============================================================
@@ -136,7 +127,9 @@ double determinantDirect(
 // ============================================================
 
 int main() {
-   // ============ НАЧАЛО ===============
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+    // ============ НАЧАЛО ===============
     int n = 0;
     std::cin >> n;
     if (!std::cin || n <= 0 || n > 10000) {
@@ -154,6 +147,13 @@ int main() {
         }
     }
 
+    std::vector<double> hostMatrix(matrixSize);
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+            hostMatrix[(size_t)j * n + i] = matrix[(size_t)i * n + j];
+        }
+    }
+
     // ============ НАСТРОЙКА CUDA ===============
     double* d_matrix = nullptr;
     if (!checkCuda(
@@ -164,9 +164,20 @@ int main() {
     }
 
     if (!checkCuda(
-        cudaMemcpy(d_matrix, matrix.data(), matrixSize * sizeof(double), cudaMemcpyHostToDevice),
+        cudaMemcpy(d_matrix, hostMatrix.data(), matrixSize * sizeof(double), cudaMemcpyHostToDevice),
         "copy matrix to GPU"
     )) {
+        cudaFree(d_matrix);
+        return 0;
+    }
+
+    cudaEvent_t start, stop;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate start")) {
+         cudaFree(d_matrix);
+        return 0;
+    }
+    if (!checkCuda(cudaEventCreate(&stop), "cudaEventCreate stop")) {
+        cudaEventDestroy(start);
         cudaFree(d_matrix);
         return 0;
     }
@@ -175,12 +186,13 @@ int main() {
     int swaps = 0;
     bool singular = false;
     bool cudaOk = true;
+    double totalMs = 0;
 
     for (int k = 0; k < n; ++k) {
         // Ищем главный элемент в текущем столбце.
         int pivotRow = -1;
         try {
-            pivotRow = findPivotNaive(d_matrix, n, k);
+            pivotRow = findPivotTransposed(d_matrix, n, k);
         }
         catch (const std::exception& e) {
             formatError("Thrust pivot search", e.what());
@@ -190,8 +202,7 @@ int main() {
 
         double maxAbs = 0.0;
         if (!checkCuda(
-            cudaMemcpy(&maxAbs, d_matrix + (size_t)pivotRow * n + k, sizeof(double), cudaMemcpyDeviceToHost
-            ),
+            cudaMemcpy(&maxAbs, d_matrix + (size_t)k * n + pivotRow, sizeof(double), cudaMemcpyDeviceToHost),
             "copy pivot to CPU"
         )) {
             cudaOk = false;
@@ -202,40 +213,49 @@ int main() {
             singular = true;
             break;
         }
-        
+
         if (k == n-1) continue;
 
         // Переставляем строки исходной матрицы.
         if (pivotRow != k) {
-            swapRows<<<SWAP_GRID, SWAP_BLOCK>>>(d_matrix, n, k, pivotRow);
+            swapTransposed<<<SWAP_GRID, SWAP_BLOCK>>>(d_matrix, n, k, pivotRow);
             if (!checkCuda(cudaGetLastError(), "swap kernel launch")) {
                 cudaOk = false;
                 break;
             }
             ++swaps;
         }
-       
+
         dim3 block(BLOCK_X, BLOCK_Y);
         dim3 grid(GRID_X, GRID_Y);
-        naive<<<grid, block>>>(d_matrix, n, k);
-
-        if (!checkCuda(
-            cudaGetLastError(),
-            "elimination kernel launch"
-        )) {
+        if (!checkCuda(cudaEventRecord(start), "cudaEventRecord start")) { // Временная петля в 22 минуты запущена
             cudaOk = false;
             break;
         }
+        halfRefinement<<<grid, block>>>(d_matrix, n, k);
+        if (!checkCuda(cudaEventRecord(stop), "cudaEventRecord stop")) { // Хранилище номаи обесточено
+            cudaOk = false;
+            break;
+        }
+        if (!checkCuda(cudaEventSynchronize(stop), "kernel execution")) {
+            cudaOk = false;
+            break;
+        }
+
+        if (!checkCuda(cudaGetLastError(), "elimination kernel launch")) {
+            cudaOk = false;
+            break;
+        }
+
+        float milliseconds = 0;
+        if (!checkCuda(cudaEventElapsedTime(&milliseconds, start, stop), "cudaEventElapseTime not calculated")) {
+            cudaOk = false;
+            break;
+        }
+        totalMs += milliseconds;
     }
 
-    // Ждём завершения всех ядер.
-    if (cudaOk) {
-        if (!checkCuda(cudaDeviceSynchronize(), "kernel execution")) {
-            cudaOk = false;
-            cudaFree(d_matrix);
-            return 0;
-        }
-    }
+    cudaEventDestroy(start); cudaEventDestroy(stop);
 
     // ============ РЕЗУЛЬТАТЫ ===============
     std::vector<double> diagonal(n, 0.0);
@@ -252,9 +272,10 @@ int main() {
 
     double determinant = 0.0;
     if (cudaOk && !singular) {
-        determinant = determinantDirect(diagonal, swaps);
+        determinant = determinantLog(diagonal, swaps);
     }
-    std::cout << std::scientific << std::setprecision(10) << determinant << '\n';
+    std::cout << determinant << '\n';
+    std::cout << totalMs << '\n';
 
     if (!cudaOk) {
         formatError("Result", "computation was not completed");

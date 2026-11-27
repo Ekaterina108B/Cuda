@@ -1,9 +1,9 @@
 #include <iostream>
 #include <cuda_runtime.h>
-#include <cmath>
-#include <iomanip>
 #include <vector>
 #include <string>
+#include <cmath>
+#include <iomanip>
 #include <exception>
 
 #include <thrust/execution_policy.h>
@@ -13,12 +13,13 @@
 
 constexpr double EPS = 1e-7;
 
-constexpr int BLOCK_X = 16;
-constexpr int BLOCK_Y = 16;
+constexpr int BLOCK_X = 32;
+constexpr int BLOCK_Y = 32;
 constexpr int GRID_X = 32;
 constexpr int GRID_Y = 32;
 constexpr int SWAP_BLOCK = 256;
 constexpr int SWAP_GRID = 32;
+
 
 // ============================================================
 // ХЭЛПЕРЫ
@@ -73,22 +74,59 @@ __global__ void swapTransposed(double* T, int n, int c1, int c2) {
 }
 
 
-// Обновление транспонированной матрицы
-__global__ void halfRefinement(double* T, int n, int k) {
-    // Координаты потока
-    int j = k + 1 + blockIdx.y * blockDim.y + threadIdx.y;
-    int i = k + 1 + blockIdx.x * blockDim.x + threadIdx.x;
+// Обновление транспонированной матрицы с использованием разделяемой памяти
+__global__ void shared(double* T, int n, int k) {
+    __shared__ double pivotTile[BLOCK_X];
+    __shared__ double factorTile[BLOCK_Y];
+    __shared__ double pivot;
 
-    // Шаг перемещения по сетке
-    int strideY = blockDim.y * gridDim.y;
-    int strideX = blockDim.x * gridDim.x;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
 
-    // Проходим по строкам транспонированной матрицы
-    for (; j < n; j += strideY) {
-        double factor = T[(size_t)j * n + k] / T[(size_t)k * n + k];
-        // Проходим по столбцам транспонированной матрицы
-        for (int col = i; col < n; col += strideX) {
-            T[(size_t)j * n + col] -= factor * T[(size_t)k * n + col];
+    // Опорный элемент загружается один раз на блок.
+    if (tx == 0 && ty == 0) {
+        pivot = T[(size_t)k * n + k];
+    }
+    __syncthreads();
+
+    // Grid-loop по блокам строк матрицы.
+    for (int jBase = k + 1 + blockIdx.y * BLOCK_Y; jBase < n; jBase += gridDim.y * BLOCK_Y) {
+        int j = jBase + ty;
+
+        // Каждый поток с tx == 0 загружает
+        // множитель для своей строки.
+        if (tx == 0) {
+            if (j < n) {
+                factorTile[ty] = T[(size_t)j * n + k] / pivot;
+            } else {
+                factorTile[ty] = 0.0;
+            }
+        }
+        __syncthreads();
+
+        // Grid-loop по столбцам матрицы.
+        for (int iBase = k + 1 + blockIdx.x * BLOCK_X; iBase < n; iBase += gridDim.x * BLOCK_X) {
+            int i = iBase + tx;
+
+            // Опорная строка загружается в shared memory.
+            // Каждый tx загружает один элемент.
+            if (ty == 0) {
+                if (i < n) {
+                    pivotTile[tx] = T[(size_t)k * n + i];
+                } else {
+                    pivotTile[tx] = 0.0;
+                }
+            }
+            __syncthreads();
+
+            // Каждый поток изменяет только свой элемент.
+            if (j < n && i < n) {
+                T[(size_t)j * n + i] -= factorTile[ty] * pivotTile[tx];
+            }
+
+            // Ждём завершения обновления перед
+            // следующей загрузкой pivotTile.
+            __syncthreads();
         }
     }
 }
@@ -125,8 +163,9 @@ double determinantLog(const std::vector<double>& diagonal, int swaps) {
 // ============================================================
 // CPU
 // ============================================================
-
 int main() {
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
     // ============ НАЧАЛО ===============
     int n = 0;
     std::cin >> n;
@@ -153,7 +192,7 @@ int main() {
     }
 
     // ============ НАСТРОЙКА CUDA ===============
-    double* d_matrix = nullptr;
+     double* d_matrix = nullptr;
     if (!checkCuda(
         cudaMalloc((void**)&d_matrix, matrixSize * sizeof(double)),
         "cudaMalloc d_matrix"
@@ -169,10 +208,22 @@ int main() {
         return 0;
     }
 
+    cudaEvent_t start, stop;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate start")) {
+         cudaFree(d_matrix);
+        return 0;
+    }
+    if (!checkCuda(cudaEventCreate(&stop), "cudaEventCreate stop")) {
+        cudaEventDestroy(start);
+        cudaFree(d_matrix);
+        return 0;
+    }
+
     // ============ МЕТОД ГАУССА ===============
     int swaps = 0;
     bool singular = false;
     bool cudaOk = true;
+    double totalMs = 0;
 
     for (int k = 0; k < n; ++k) {
         // Ищем главный элемент в текущем столбце.
@@ -214,22 +265,34 @@ int main() {
 
         dim3 block(BLOCK_X, BLOCK_Y);
         dim3 grid(GRID_X, GRID_Y);
-        halfRefinement<<<grid, block>>>(d_matrix, n, k);
+        if (!checkCuda(cudaEventRecord(start), "cudaEventRecord start")) { // Временная петля в 22 минуты запущена
+            cudaOk = false;
+            break;
+        }
+        shared<<<grid, block>>>(d_matrix, n, k);
+        if (!checkCuda(cudaEventRecord(stop), "cudaEventRecord stop")) { // Хранилище номаи обесточено
+            cudaOk = false;
+            break;
+        }
+        if (!checkCuda(cudaEventSynchronize(stop), "kernel execution")) {
+            cudaOk = false;
+            break;
+        }
 
         if (!checkCuda(cudaGetLastError(), "elimination kernel launch")) {
             cudaOk = false;
             break;
         }
+
+        float milliseconds = 0;
+        if (!checkCuda(cudaEventElapsedTime(&milliseconds, start, stop), "cudaEventElapseTime not calculated")) {
+            cudaOk = false;
+            break;
+        }
+        totalMs += milliseconds;
     }
 
-    // Ждём завершения всех ядер.
-    if (cudaOk) {
-        if (!checkCuda(cudaDeviceSynchronize(), "kernel execution")) {
-            cudaOk = false;
-            cudaFree(d_matrix);
-            return 0;
-        }
-    }
+    cudaEventDestroy(start); cudaEventDestroy(stop);
 
     // ============ РЕЗУЛЬТАТЫ ===============
     std::vector<double> diagonal(n, 0.0);
@@ -248,7 +311,8 @@ int main() {
     if (cudaOk && !singular) {
         determinant = determinantLog(diagonal, swaps);
     }
-    std::cout << std::scientific << std::setprecision(10) << determinant << '\n';
+    std::cout << determinant << '\n';
+    std::cout << totalMs << '\n';
 
     if (!cudaOk) {
         formatError("Result", "computation was not completed");

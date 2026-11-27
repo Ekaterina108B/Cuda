@@ -20,6 +20,7 @@ constexpr int GRID_Y = 32;
 constexpr int SWAP_BLOCK = 256;
 constexpr int SWAP_GRID = 32;
 
+
 // ============================================================
 // ХЭЛПЕРЫ
 // ============================================================
@@ -163,7 +164,9 @@ double determinantLog(const std::vector<double>& diagonal, int swaps) {
 // CPU
 // ============================================================
 int main() {
-     // ============ НАЧАЛО ===============
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+    // ============ НАЧАЛО ===============
     int n = 0;
     std::cin >> n;
     if (!std::cin || n <= 0 || n > 10000) {
